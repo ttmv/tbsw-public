@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <link rel ="stylesheet" href="wsgui.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  </head>
+  <body>
+    <!---<script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/2.2.0/socket.io.js" integrity="sha256-yr4fRk/GU1ehYJPAs8P4JlTgu0Hdsp4ZKrx8bDEDC3I=" crossorigin="anonymous"></script>-->
+    <script src="socket.io.js" ></script>
+    <script type="text/javascript" charset="utf-8">
+      const socket = io({autoConnect: false});
+      let loggingOn = false;
+      let bgOpen = false;
+      let contStatusOn = false;
+      let statusTimer;
+
+
+     /*                           *  
+      * Websocket event handlers: *
+      *                           */
+
+      /* debugmessages */
+ 
+      socket.on('connect', function() {
+        socket.emit('clientconn', {data: 'client connected'});
+      });
+
+
+      socket.on('disconnect', function() {
+        console.log("socket disconnected"); 
+      });
+
+
+
+      /* print infomessages from server / controlSW to the GUI page 
+         Examples: sensor started (by control SW); request to stop sensors sent; 
+         sensors stopped
+      */      
+      socket.on('info', function(infomsg) {
+        console.log(infomsg);
+        document.getElementById("infobox").innerHTML = "<p>" + infomsg + "</p>";
+
+        if (infomsg === "sensors stopped") {
+          disconnect("logging");
+        } 
+
+        if (infomsg === "sensorSW connected" || infomsg === "BG closed, backend needs restart.") {
+          bgOpen = false;
+          disconnect("bg");
+        }
+      });
+
+
+      /*
+        Sensors status received, 
+        prints it to sensor status window on the web page
+      */
+      socket.on('sensor status', function(statusinfo) {
+        clearStatus();
+        console.log("sensor status", statusinfo);
+        document.getElementById("generalStatus").innerHTML = "";       
+        let infoElem = "";
+        sensorStatusMsg = "";
+  
+        if (statusinfo.substr(8).startsWith("No sensors")) {          
+          //clearStatus();
+          infoElem = "generalStatus";
+          document.getElementById(infoElem).innerHTML = statusinfo.substr(8);
+        }
+
+        else {
+          let statusMsgArr = statusinfo.substr(8).split("_");
+          console.log("msgarr", statusMsgArr);
+
+          /* status info is currently sent as a string 
+           and is parsed here to somewhat more readable format */ 
+          for (let i = 0; i < statusMsgArr.length; i++) {
+            console.log("status", statusMsgArr[i]);
+
+            if (statusMsgArr[i] == "") {
+              infoElem = "generalStatus";
+              sensorStatusMsg = "info missing";
+            }
+            // ublox status parser:
+            else if (statusMsgArr[i].startsWith("Ublox")) {
+              infoElem = "ubloxInfo";
+              if (statusMsgArr[i].split(";").length === 2) { 
+                sensorStatusMsg = statusMsgArr[i]; 
+              } else {
+                clearUTable();
+                ubloxStatus = statusMsgArr[i].split(";")
+                sensorStatusMsg = ubloxStatus[0] + ": " + ubloxStatus[ubloxStatus.length - 1];
+                let tr = document.createElement("tr");
+                tr.innerHTML = "<th>gnssId</th><th>svId</th><th>C/No</th>";
+                let ubloxTable = document.getElementById("ubloxInfoTab");
+                ubloxTable.appendChild(tr);
+              
+                for(let i = 1; i<ubloxStatus.length -1; i++) {
+                  tr = document.createElement("tr");
+                  let values = ubloxStatus[i].split(":");
+                
+                  tr.innerHTML = "<td>"+parseInt(values[1])+"</td> <td>"+parseInt(values[2])+"</td> <td>"+parseInt(values[3])+"</td>";
+                  ubloxTable.appendChild(tr);
+                }
+              }
+            }
+          // sensor other than Ublox: 
+            else {
+              if (statusMsgArr[i].startsWith("RealS")) {
+               //console.log("rs");
+               infoElem = "rsInfo";
+              } else if (statusMsgArr[i].startsWith("Awinda")) {
+                //console.log("awinda");
+                infoElem = "xsensInfo";
+              } else if (statusMsgArr[i].startsWith("USRP")) {
+                infoElem = "b210Info";
+              } else if (statusMsgArr[i].startsWith("Ref")) {
+                infoElem = "refInfo";
+              } 
+
+              //message format if recording: $Sensor: recording at $timestamp
+              //in which case timestamp is shown in human readable format
+              if(statusMsgArr[i].indexOf("recording") > 0 || statusMsgArr[i].indexOf("read errors") > 0) {
+                let dateIndex;
+                if (statusMsgArr[i].startsWith("Ref")) {
+                  if(statusMsgArr[i].indexOf("recording") > 0) dateIndex = 4;
+                  else dateIndex = 5;
+                }
+
+                else dateIndex = 3;
+
+
+
+                sensorMsgArr = statusMsgArr[i].split(" ");
+                console.log("no date: ", statusMsgArr[i].substr(0, statusMsgArr[i].length - 13))
+                let sensorDate = new Date(parseInt(sensorMsgArr[dateIndex]));
+                sensorStatusMsg = statusMsgArr[i].substr(0, statusMsgArr[i].length - 14) + sensorDate.toISOString();     
+              } else {
+                sensorStatusMsg = statusMsgArr[i];
+              }
+            }
+                    
+            document.getElementById(infoElem).innerHTML = sensorStatusMsg;
+
+          }
+        } //end of parser  
+        //document.getElementById("sensorinfo").innerHTML = "<p>"+ statusinfo.substr(8) +"</p>";
+        disconnect("oneTimer");
+      });
+    
+
+
+     /*                          * 
+      *  Frontend functionality  *
+      *                          */ 
+
+      function clearStatus() {
+        ["xsensInfo", "rsInfo", "ubloxInfo", "b210Info", "refInfo"].forEach(elem => { 
+          console.log(elem);
+          document.getElementById(elem).innerHTML = ""; 
+        });
+
+        clearUTable();
+      }
+
+
+      function clearUTable() {
+        document.getElementById("ubloxInfoTab").innerHTML = "";         
+      }      
+
+
+      /* disconnect websocket between frontend and backend if it's not used */
+      function disconnect(requester) {
+        if (socket.connected) {
+          if((requester=="bg" && !contStatusOn && !loggingOn) || 
+             (requester=="logging" && !contStatusOn) || 
+             (requester=="contStatus" && !loggingOn) || 
+             (requester=="oneTimer" && !loggingOn && !contStatusOn )) {
+              socket.disconnect(); 
+              //console.log("disconnected by", requester); 
+          } else {
+            console.log("not disconnected, dconn req by", requester);
+          }
+        }        
+      }
+
+      /* Sends a request to start or stop sensors and logging */
+      function postRequest(data) {
+        console.log("sending data", data);
+        socket.emit('logtoggle', data);
+      }
+
+
+
+      /* Creates a list of selected sensors */
+      function collectSensors() {
+        let sensorlist = [];
+        let allSensors = document.getElementsByTagName("input");
+
+        for (var i = 0; i < allSensors.length; i++) {
+          var s = allSensors[i]
+          console.log(s.checked)
+          if (s.checked) sensorlist.push(s.name)
+        }
+
+        return sensorlist;
+      }
+
+
+      /*
+        Func startLogging:
+          Changes the start button to stop button and sends a list of selected 
+          sensors and a request to start sensors to the web backend.
+      */
+      function startLogging() {
+        let sensorlist = collectSensors();
+        let data = {action: "start", sensors: sensorlist }
+
+        loggingOn = true; 
+        if (!socket.connected) socket.connect();
+
+        document.getElementById("infobox").innerHTML = "<p>starting...</p>";
+        document.getElementById("startbtn").innerHTML = "Stop logging";
+        postRequest(data);        
+      }
+
+
+      /*
+        Func stopLogging:
+          Changes the button text and functionality back to start sensor button 
+          and sends request to sensor control SW via web backend to stop sensors.
+      */
+      function stopLogging() {
+        document.getElementById("infobox").innerHTML = "<p>stop: waiting for server  ... </p>";
+        document.getElementById("startbtn").innerHTML = "Start logging";
+        console.log("logging off");
+        loggingOn = false;
+        postRequest({action: "stop"});
+      }
+
+
+      /* Start and stop sensors */
+      function toggleLogging() {
+        let logstatus = document.getElementById("startbtn").innerHTML.split(" ")[0];
+        if (logstatus=="Start") {
+          startLogging();
+        } else {
+          stopLogging();
+        }
+      }
+
+
+      /*
+        configure B210
+      */
+
+      function confB210() {
+        console.log("conf sensor");
+        console.log("freq", document.getElementById("freq").value);
+        
+        let newConf = {
+          freq: parseFloat(document.getElementById("freq").value),
+          rate: parseFloat(document.getElementById("rate").value),
+          gain: parseFloat(document.getElementById("gain").value),
+          bandwidth: parseFloat(document.getElementById("bandwidth").value)
+        };
+
+        let data = {action: "opt", opt: JSON.stringify(newConf)};
+        console.log("opt data", data);
+        console.log("conf", newConf["bandwidth"]);
+        postRequest(data);
+        closeB210Conf();
+      }
+
+
+
+      function closeB210Conf() {
+        let controls = document.getElementById("b210Controls");
+        let confTable = document.getElementById("b210conftable");
+        controls.removeChild(confTable);
+        document.getElementById("b210ConfBtn").style.visibility = "visible";
+      }
+
+
+
+      /*
+        Func openB210Conf:
+          Opens configuration options for USRP B210 
+          and initializes them with default values.
+      */
+
+      function openB210Conf() {
+        let defaultConf = {
+          freq: 1.57542e9,
+          rate: 10e6,
+          gain: 76.0,
+          bandwidth: 4e7
+        };
+
+        let confNames = {
+          freq: "Center frequency", 
+          rate: "Sample rate",
+          gain: "Gain",
+          bandwidth: "Bandwidth"
+        };
+
+        let confTable = document.createElement("table");
+        confTable.setAttribute("id", "b210conftable");
+
+        ["freq", "rate", "gain", "bandwidth"].forEach(val => { 
+          let tr = document.createElement("tr");
+          tr.innerHTML = '<td>'+confNames[val]+': <input type="number" id="'+val+'" name="'+val+'" value="'+defaultConf[val]+'"></td>';
+          //tr.innerHTML = "<td>"+val+": </td>";
+          confTable.appendChild(tr);
+        });
+
+
+        let tr = document.createElement("tr");
+        tr.innerHTML = '<td><button id="b210ConfBtn" class=confbutton onclick="confB210()">send configuration</button> <button class=confbutton onclick="closeB210Conf()">cancel conf</button></td>';
+        confTable.appendChild(tr);
+        document.getElementById("b210Controls").appendChild(confTable);
+        document.getElementById("b210ConfBtn").style.visibility = "hidden";
+      }
+
+
+
+      /*
+        Func checkStatus:
+          Requests sensor status.
+      */
+
+      function checkStatus() {
+        console.log("statuscheck");
+        if (!socket.connected) socket.connect();
+        let sensorlist = collectSensors();
+        let data = {action: "info"};
+        socket.emit('sensorstatreq', data);        
+      }
+
+
+      /*
+        Func contStatus:
+          Enable and disable continuous sensor status checking. 
+          If continuous checking is enabled, GUI will request 
+          latest status info once in 3 seconds. 
+           
+      */
+      function contStatus() {
+        let checkRate = 3000;
+        let contstr = document.getElementById("contStatus").innerHTML.split(" ")[0];
+        console.log(contstr);
+        //socket.emit('status change', contstr);
+
+        if (contstr === "Enable") {
+          contStatusOn = true;
+          statusTimer = setInterval(checkStatus, checkRate);
+          document.getElementById("contStatus").innerHTML = "Disable continuous checking"
+        }
+
+        if (contstr === "Disable") {
+          disconnect("contStatus");
+          clearInterval(statusTimer);
+          contStatusOn = false;
+          document.getElementById("contStatus").innerHTML = "Enable continuous checking"
+        }        
+      }
+
+
+      /*
+        Func toggleBG
+          Open and close connection to the control SW. 
+          Can only be done once without restarting web backend
+      */
+      function toggleBG() {
+        let bgStr = document.getElementById("bgConn").innerHTML.split(" ")[0];
+        console.log("bgconn", bgStr); 
+        if (bgStr == "Start") {
+          bgOpen = true;
+          if(!socket.connected) socket.connect();
+          document.getElementById("bgConn").innerHTML = "Stop BGconn";
+          //socket.emit('startBg', {}); 
+          socket.emit('startBg', bgStr);
+        }
+
+        if (bgStr == "Stop") {
+          document.getElementById("bgConn").innerHTML = "Start BGconn";
+          if(!socket.connected) socket.connect();
+          socket.emit('stopBg', bgStr);
+          //bgOpen = false;
+          //disconnect("bg");
+        }       
+      }
+
+    </script>
+
+    <button id="bgConn" onclick="toggleBG();">Start BGconn</button>      
+    <h1>Indoor/outdoor navigation testbed</h1>
+
+    <div id="content" class="content">
+      <div id="logging" class="loggingbox">    
+        <h3>Sensor selection</h3>
+
+        <table id="sensorlist">
+          <tr>
+            <td><input type="checkbox" checked="checked" name="awinda" value="awinda" > Xsens Awinda </td>
+            <td><span class="confinfo">pre-configured</span></td>
+            <!---<td><button id="awindaBtn" class=confbutton onclick="conf()">configure</button> </td>-->
+          </tr>
+          <tr>
+            <td><input type="checkbox" checked="checked" name="ublox" value="ublox"> Ublox C099-F9P</td>
+            <td><span class="confinfo">pre-configured</span></td>
+            <!--- <td><button id="ubloxConfBtn" class=confbutton onclick="conf()">configure</button></td>-->
+          <tr>
+          <tr>
+            <td><input type="checkbox" checked="checked" name="T265" value="T265"> RealSense T265 </td>
+            <td><span class="confinfo">pre-configured</span></td>
+            <!---<td><button id="realsenseConfBtn" class=confbutton onclick="conf()">configure</button> </td>-->
+          </tr>
+          <tr id="b210Controls">
+            <td><input type="checkbox" checked="checked" name="B210" value="b210"> USRP B210</td> 
+            <td><button id="b210ConfBtn" class=confbutton onclick="openB210Conf()">configure</button></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox" checked="checked" name="refImu" value="refImu"> Reference IMU</td> 
+            <td><span class="confinfo">pre-configured</span></td> 
+          </tr>
+        </table>
+  
+
+        <button id="startbtn" onclick="toggleLogging();">Start logging</button>
+        <h4>Info:</h4>
+        <div id="infobox" class="infobox"></div>
+      </div>
+    
+      <div id="sensorstatus" class="statusbox">
+        <h3>Sensor status</h3>
+        <div id="sensorinfo" class="sensorinfo">
+          <p id="generalStatus"></p>
+          <p id="xsensInfo"></p>
+          <p id="rsInfo"></p>
+          <p id="b210Info"></p>
+          <p id="refInfo"></p>
+          <p id="ubloxInfo"></p>
+          <table id="ubloxInfoTab"></table>
+        </div>
+        <button id="checkStatus" onclick="checkStatus();">Check sensor status</button>
+        <button id="contStatus" onclick="contStatus();">Enable continuous checking</button> 
+      </div>
+    </div>
+  </body>
+</html>
